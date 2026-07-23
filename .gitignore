@@ -9,3 +9,4 @@ led.txt
 log.txt
 error.txt
 sdkconfig_backup
+main/secrets.c

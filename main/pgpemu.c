@@ -19,9 +19,10 @@
 
 #include "tftspi.h"
 #include "tft.h"
-//#include "spiffs_vfs.h" //not needed
+
 #include <time.h>
 #include <unistd.h>
+#include <math.h>
 
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -47,8 +48,15 @@ int16_t pokestops = 0;
 int16_t pokemon_changed = 0;
 int8_t device = 0;
 
+uint8_t bag_full = 0;
+uint8_t out_of_balls = 0;
+uint8_t current_action = 0; // 0 = Idle, 1 = Catching, 2 = Spinning
+uint8_t catch_shakes = 0;
+
 uint8_t screensaver = 0;
 uint8_t screensaver_time = 30;
+uint8_t settings_unlocked = 0;
+uint8_t auto_catch_new = 0; // Default to 0 (Disabled)
 
 uint8_t waiting_time = 60;
 uint8_t current_time = 60;
@@ -160,6 +168,7 @@ static const uint8_t char_prop_write = ESP_GATT_CHAR_PROP_BIT_WRITE;
 
 static const uint8_t char_prop_read_notify = ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_NOTIFY;
 static const uint8_t char_prop_notify = ESP_GATT_CHAR_PROP_BIT_NOTIFY;
+static const uint8_t char_prop_read_write = ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_WRITE;
 static const uint8_t dummy_value[2] = {0x00, 0x00};
 static uint8_t cert_buffer[378];
 
@@ -215,6 +224,7 @@ uint8_t GATTS_CHAR_UUID_BUTTON[ESP_UUID_LEN_128] = {0xed, 0x9a, 0x93, 0xb9, 0xb5
 uint8_t GATTS_CHAR_UUID_UNKNOWN[ESP_UUID_LEN_128] = {0xee, 0x9a, 0x93, 0xb9, 0xb5, 0x82, 0x4c, 0x5c, 0xa3, 0x63, 0xcb, 0x67, 0x62, 0x4, 0xc5, 0x21};
 uint8_t GATTS_CHAR_UUID_UPDATE_REQUEST[ESP_UUID_LEN_128] = {0xef, 0x9a, 0x93, 0xb9, 0xb5, 0x82, 0x4c, 0x5c, 0xa3, 0x63, 0xcb, 0x67, 0x62, 0x4, 0xc5, 0x21};
 uint8_t GATTS_CHAR_UUID_FW_VERSION[ESP_UUID_LEN_128] = {0xf0, 0x9a, 0x93, 0xb9, 0xb5, 0x82, 0x4c, 0x5c, 0xa3, 0x63, 0xcb, 0x67, 0x62, 0x4, 0xc5, 0x21};
+uint8_t GATTS_CHAR_UUID_CONFIG[ESP_UUID_LEN_128] = {0xf1, 0x9a, 0x93, 0xb9, 0xb5, 0x82, 0x4c, 0x5c, 0xa3, 0x63, 0xcb, 0x67, 0x62, 0x4, 0xc5, 0x21};
 
 static const uint8_t led_char_value[100];
 
@@ -316,6 +326,19 @@ static const esp_gatts_attr_db_t gatt_db_led_button[LED_BUTTON_LAST_IDX] = {
             MAX_VALUE_LENGTH, sizeof (led_char_value), (uint8_t *) led_char_value}
     },
 
+    /* Characteristic Declaration */
+    [IDX_CHAR_CONFIG] =
+    {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *) & character_declaration_uuid, ESP_GATT_PERM_READ,
+            CHAR_DECLARATION_SIZE, CHAR_DECLARATION_SIZE, (uint8_t *) & char_prop_read_write}
+    },
+    [IDX_CHAR_CONFIG_VAL] =
+    {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_128, (uint8_t *) & GATTS_CHAR_UUID_CONFIG, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+            MAX_VALUE_LENGTH, sizeof (led_char_value), (uint8_t *) led_char_value}
+    },
 };
 
 
@@ -398,7 +421,9 @@ const char *led_button_char_names[] = {
     "CHAR_UPDATE_REQUEST",
     "CHAR_UPDATE_REQUEST_VAL",
     "CHAR_FW_VERSION",
-    "CHAR_FW_VERSION_VAL"
+    "CHAR_FW_VERSION_VAL",
+    "CHAR_CONFIG",       // NEW
+    "CHAR_CONFIG_VAL"    // NEW
 };
 
 const char *cert_char_names[] = {
@@ -702,7 +727,6 @@ void handle_led_notify_from_app(const uint8_t *buffer) {
     uint8_t pattern_id = 0;
 
     ESP_LOGI(GATTS_TABLE_TAG, "LED: Pattern Count=%d priority: %d", number_of_patterns, priority);
-    //1 pattern = 3 bytes
     for (int i = 0; i < number_of_patterns; i++) {
         int p = 4 + 3 * i;
         const uint8_t *pat = &buffer[p];
@@ -716,26 +740,83 @@ void handle_led_notify_from_app(const uint8_t *buffer) {
 
     ESP_LOGI(GATTS_TABLE_TAG, "Pattern ID: %u", pattern_id);
     switch (pattern_id) {
+        case PATTERN_STOP_START:
+            current_action = 2; // We are targeting a stop
+            break;
         case PATTERN_STOP_SUCCES:
         case PATTERN_STOP_SUCCES2:
         case PATTERN_GYM_SUCCES:
             pokestops++;
+            bag_full = 0; 
+            current_action = 0;
             ESP_LOGI(GATTS_TABLE_TAG, "Pokestops: %u", pokestops);
             break;
         case PATTERN_CATCH_START:
             pokemon_seen++;
-            ESP_LOGI(GATTS_TABLE_TAG, "Seen: %u", pokestops);
+            out_of_balls = 0; 
+            current_action = 1; // We are catching
+            catch_shakes = 0;
+            ESP_LOGI(GATTS_TABLE_TAG, "Seen: %u", pokemon_seen);
             break;
         case PATTERN_CATCH_SUCCES:
             pokemon_caught++;
-            ESP_LOGI(GATTS_TABLE_TAG, "Caught: %u", pokestops);
+            current_action = 0;
+            ESP_LOGI(GATTS_TABLE_TAG, "Caught: %u", pokemon_caught);
+            break;
+        case PATTERN_CATCH_FAIL: // 117
+            // A genuine flee after throwing a ball
+            current_action = 0;
+            ESP_LOGI(GATTS_TABLE_TAG, "Pokemon Fled.");
+            break;
+        case PATTERN_CATCH_START_NEW: 
+            if (auto_catch_new == 0) {
+                ESP_LOGI(GATTS_TABLE_TAG, "New encounter! Waiting for manual catch.");
+                // Return early without changing 'current_action' so it doesn't auto-throw
+                return; 
+            } else {
+                pokemon_seen++;
+                out_of_balls = 0; 
+                current_action = 1;
+                catch_shakes = 0;
+                ESP_LOGI(GATTS_TABLE_TAG, "Seen New: %u", pokemon_seen);
+            }
             break;
         default:
-            ESP_LOGI(GATTS_TABLE_TAG, "Other pattern: %u", pattern_id);
+            if (pattern_id == 45) {
+                if (number_of_patterns >= 5) {
+                    // Out of Pokeballs (3 red flashes + 3 off pauses = 6)
+                    out_of_balls = 1;
+                    if (current_action == 1) {
+                        pokemon_seen--; // Undo the seen count so it doesn't inflate flees
+                    }
+                    current_action = 0;
+                    ESP_LOGI(GATTS_TABLE_TAG, "Out of Pokeballs!");
+                    
+                    refresh_screen = 1;
+                    return; // Skip sending a button press
+                } else if (current_action == 1) {
+                    // 1 White Flash during a catch = Pokeball shook
+                    catch_shakes++;
+                    ESP_LOGI(GATTS_TABLE_TAG, "Ball shook!");
+                } else {
+                    // 1 White Flash NOT during a catch = Bag Full
+                    bag_full = 1;
+                    current_action = 0;
+                    ESP_LOGI(GATTS_TABLE_TAG, "Bag Full!");
+                    
+                    refresh_screen = 1;
+                    return; // Skip sending a button press
+                }
+            } else {
+                ESP_LOGI(GATTS_TABLE_TAG, "Other pattern: %u (Count: %d)", pattern_id, number_of_patterns);
+            }
+            break;
     }
+    
+    refresh_screen = 1;
+
     ESP_LOGI(GATTS_TABLE_TAG, "Sending push button");
     xQueueSend(button_queue, &number_of_patterns, portMAX_DELAY);
-
 }
 
 void pgp_exec_write_event_env(esp_gatt_if_t gatts_if, prepare_type_env_t *prepare_write_env, esp_ble_gatts_cb_param_t *param) {
@@ -810,6 +891,13 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
         case ESP_GATTS_READ_EVT:
             ESP_LOGI(GATTS_TABLE_TAG, "ESP_GATTS_READ_EVT state=%d %s", cert_state,
                     char_name_from_handle(param->read.handle));
+            
+            // Switch to Config Mode display if the Web App reads the settings
+            if (param->read.handle == led_button_handle_table[IDX_CHAR_CONFIG_VAL]) {
+                display_state = 4;
+                refresh_screen = 1;
+            }
+
             if (cert_state == 1) {
                 ESP_LOGI(GATTS_TABLE_TAG, "DATA SENT TO APP");
                 esp_log_buffer_hex(GATTS_TABLE_TAG, cert_buffer, 52);
@@ -865,6 +953,30 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
                 } else if (led_button_handle_table[IDX_CHAR_LED_VAL] == param->write.handle) {
                     handle_led_notify_from_app(param->write.value);
                     return;
+                } else if (led_button_handle_table[IDX_CHAR_CONFIG_VAL] == param->write.handle) {
+                    // --- CONFIGURATION LOGIC ---
+                    if (param->write.len >= 2) {
+                        uint8_t cmd = param->write.value[0];
+                        uint8_t val = param->write.value[1];
+                        
+                        if (cmd == 0) font_color = val % color_size;
+                        if (cmd == 1) auto_catch_new = val;
+                        if (cmd == 2) {
+                            screensaver_time = val;
+                            screensaver = screensaver_time;
+                        }
+                        
+                        // Update the characteristic so subsequent reads are accurate
+                        uint8_t new_config[3] = {font_color, auto_catch_new, screensaver_time};
+                        esp_ble_gatts_set_attr_value(led_button_handle_table[IDX_CHAR_CONFIG_VAL], 3, new_config);
+                        
+                        nvs_write();
+                        _fg = colors[font_color];
+                        pokemon_changed = 2000;
+                        display_state = 4; // Keep it in Config Mode
+                        refresh_screen = 1;
+                        ESP_LOGI(GATTS_TABLE_TAG, "Settings updated: Cmd=%d, Val=%d", cmd, val);
+                    }
                 } else {
                     ESP_LOGE(GATTS_TABLE_TAG, "unhandled data: handle: %d", param->write.handle);
                     for (int i = 0; i < CERT_LAST_IDX; i++) {
@@ -950,6 +1062,11 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
             if (param->add_attr_tab.svc_uuid.len == ESP_UUID_LEN_128) {
                 if (memcmp(param->add_attr_tab.svc_uuid.uuid.uuid128, GATTS_SERVICE_UUID_LED_BUTTON, ESP_UUID_LEN_128) == 0) {
                     memcpy(led_button_handle_table, param->add_attr_tab.handles, sizeof (led_button_handle_table));
+                    
+                    // --- NEW: Set initial config values so the web app can read them ---
+                    uint8_t init_config[3] = {font_color, auto_catch_new, screensaver_time};
+                    esp_ble_gatts_set_attr_value(led_button_handle_table[IDX_CHAR_CONFIG_VAL], 3, init_config);
+                    
                     esp_err_t response_err = esp_ble_gatts_start_service(led_button_handle_table[IDX_LED_BUTTON_SVC]);
                     if (response_err != ESP_OK) {
                         ESP_LOGE(GATTS_TABLE_TAG, "failed starting service: %d", response_err);
@@ -1212,7 +1329,7 @@ static void gpio_task(void* arg) {
             //printf("GPIO[%d] intr, val: %d\n", io_num, gpio_get_level(io_num));
             switch (io_num) {
                 case GPIO_INPUT_IO_0:
-                    // change color
+                    // cycle font color
                     if (screen_on == 1) {
                         if (gpio_get_level(io_num) == 0) {
                             if (pressed0 == 1) {
@@ -1223,7 +1340,7 @@ static void gpio_task(void* arg) {
                                     font_color = 0;
                                 }
                                 _fg = colors[font_color];
-                                pokemon_changed = 2000; //trigger update
+                                pokemon_changed = 2000; 
                                 if (screen_on == 1) {
                                     refresh_screen = 1;
                                 }
@@ -1340,6 +1457,16 @@ void nvs_read() {
         int8_t _minute = 60;
         int8_t _second = 0;
 		int8_t _device = 0;
+
+        uint8_t _auto_catch_new = 1;
+        uint8_t _screensaver_time = 30;
+
+        err = nvs_get_u8(my_handle, "auto_catch_new", &_auto_catch_new);
+        if (err == ESP_OK) auto_catch_new = _auto_catch_new;
+        
+        err = nvs_get_u8(my_handle, "ss_time", &_screensaver_time);
+        if (err == ESP_OK) screensaver_time = _screensaver_time;
+
         err = nvs_get_i16(my_handle, "pokemon_seen", &_pokemon_seen);
         if (err == ESP_OK) {
             pokemon_seen = _pokemon_seen;
@@ -1405,6 +1532,9 @@ void nvs_write() {
             if (err == ESP_OK) {
                 ESP_LOGI("NVS", "Done");
             }
+
+            err = nvs_set_u8(my_handle, "auto_catch_new", auto_catch_new);
+            err = nvs_set_u8(my_handle, "ss_time", screensaver_time);
 
             err = nvs_set_i8(my_handle, "font_color", font_color);
             if (err == ESP_OK) {
@@ -1506,7 +1636,7 @@ void init_display() {
     TFT_invertDisplay(INVERT_ON);
 
     TFT_resetclipwin();
-    TFT_setRotation(LANDSCAPE);
+    TFT_setRotation(PORTRAIT_FLIP);
     display_clean();
     TFT_setFont(MAIN_FONT, NULL);
     _fg = colors[font_color];
@@ -1522,53 +1652,99 @@ void display_clean() {
 }
 
 void display_clean_status() {
-    TFT_fillRect(0, _height-20, _width, 20, TFT_WHITE);
+    // Clear a 30-pixel tall band exactly in the middle of the screen
+    TFT_fillRect(0, (_height / 2) - 15, _width, 30, TFT_WHITE);
 }
 
 void display_clean_stats() {
-    TFT_fillRect(27, 7, 32, 14, TFT_WHITE);
-    TFT_fillRect(27+64, 7, 32, 14, TFT_WHITE);
-    TFT_fillRect(27+128, 7, 32, 14, TFT_WHITE);
+    // Clear Timer area (Top Left)
+    TFT_fillRect(5, 7, 60, 14, TFT_WHITE);
+    
+    // Clear Flees text area (Dynamically clears the gap up to the cloud icon)
+    TFT_fillRect(65, 7, _width - 65 - 25, 14, TFT_WHITE);
+    
+    // Clear Catches text area (Starts safely at x=55, leaving a 14px gap from the icon)
+    TFT_fillRect(55, (_height / 2) - 60, _width - 55, 40, TFT_WHITE);
+    
+    // Clear Pokestops text area
+    TFT_fillRect(55, (_height / 2) + 20, _width - 55, 40, TFT_WHITE);
 }
 
 void draw_screen() {
-    // Lines
     color_t col = colors[font_color];
-    uint8_t y = 14;
-    uint8_t x = 14;
     
-    TFT_drawFastHLine(0, (y*2), _width, col);
-    TFT_drawFastHLine(0, _height - (y*2), _width, col);
+    // --- STATIC ICON COLORS ---
+    // Because of hardware color inversion, {0,0,0} is White, {255,255,255} is Black
+    color_t c_bg_black   = { 255, 255, 255 }; 
+    color_t c_real_white = { 0, 0, 0 };       
+    color_t c_red        = { 255 - 245, 255 - 20, 255 - 20 };
+    color_t c_gray       = { 255 - 128, 255 - 128, 255 - 128 };
+    color_t c_lblue      = { 255 - 50,  255 - 200, 255 - 255 };
+
+    uint8_t y_top = 14;
     
-    // Pokeball icon
-    TFT_drawCircle(x, y, 3, col);
-    TFT_drawCircle(x, y, 8, col);
+    TFT_drawFastHLine(0, (y_top*2), _width, col);
+    TFT_drawFastHLine(0, _height - (y_top*2), _width, col);
     
-    TFT_drawFastHLine(x - 8, y, 6, col);
-    TFT_drawFastHLine(x + 3, y, 6, col);
-    x += 64;
+    // --- TOP ROW ---
+    // Cloud icon (Run aways) - Anchored at the far right
+    uint8_t x_run = _width - 15;
+    TFT_drawArc(x_run - 1, y_top - 4, 4, 4, 270, 180, col, TFT_WHITE);
+    TFT_drawArc(x_run + 8, y_top - 2, 4, 4, 270, 180, col, TFT_WHITE);
+    TFT_drawArc(x_run - 5, y_top + 5, 4, 4, 0, 270, col, TFT_WHITE);
+    TFT_drawFastHLine(x_run - 8, y_top - 1, 8, col);
+    TFT_drawFastHLine(x_run + 1, y_top + 1, 8, col);
+    TFT_drawFastHLine(x_run - 11, y_top + 2, 7, col);
+
+    // --- MIDDLE COLUMN ---
+    uint8_t x_icon = 25; // Shifted left to guarantee text/boxes never clip it
     
-    // Cloud icon
-    TFT_drawArc(x - 1, y - 4, 4, 4, 270, 180, col, TFT_WHITE);
-    TFT_drawArc(x + 8, y - 2, 4, 4, 270, 180, col, TFT_WHITE);
-    TFT_drawArc(x - 5, y + 5, 4, 4, 0, 270, col, TFT_WHITE);
+    // 1. Static Filled Pokeball (Catches)
+    uint8_t y_catch = (_height / 2) - 40; 
+
+    // Use math to perfectly draw the top red half without protruding corners
+    for (int dy = 0; dy <= 16; dy++) {
+        int dx = sqrt(16 * 16 - dy * dy);
+        TFT_drawFastHLine(x_icon - dx, y_catch - dy, dx * 2 + 1, c_red);
+    }
     
-    TFT_drawFastHLine(x - 8, y - 1, 8, col);
-    TFT_drawFastHLine(x + 1, y + 1, 8, col);
-    TFT_drawFastHLine(x - 11, y + 2, 7, col);
-    x += 64;
-    
-    // Pokeball icon
-    TFT_drawCircle(x, y, 4, col);
-    TFT_drawCircle(x, y, 8, col);
-    
-    TFT_drawFastHLine(x - 8, y - 2, 5, col);
-    TFT_drawFastHLine(x - 8, y + 1, 5, col);
-    TFT_drawFastHLine(x + 3, y - 2, 5, col);
-    TFT_drawFastHLine(x + 3, y + 1, 5, col);
-    
-    TFT_fillRect(x - 8, y - 1, 18, 2, TFT_WHITE);
-    TFT_fillCircle(x, y, 1, col);
+    // Use math to perfectly draw the bottom white half without protruding corners
+    for (int dy = 0; dy <= 16; dy++) {
+        int dx = sqrt(16 * 16 - dy * dy);
+        TFT_drawFastHLine(x_icon - dx, y_catch + dy, dx * 2 + 1, c_real_white);
+    }
+    // Draw gray band perfectly staying inside the circle
+    for (int dy = -2; dy <= 2; dy++) {
+        int dx = sqrt(16 * 16 - dy * dy);
+        TFT_drawFastHLine(x_icon - dx, y_catch + dy, dx * 2 + 1, c_gray);
+    }
+    // Center buttons
+    TFT_fillCircle(x_icon, y_catch, 6, c_bg_black); 
+    TFT_fillCircle(x_icon, y_catch, 4, c_gray);             
+    TFT_fillCircle(x_icon, y_catch, 2, c_real_white);       
+
+    // 2. Static Filled Pokestop (Spins)
+    uint8_t y_stop = (_height / 2) + 40; 
+    TFT_fillCircle(x_icon, y_stop, 16, c_lblue);
+    TFT_fillCircle(x_icon, y_stop, 12, c_real_white); 
+    TFT_fillCircle(x_icon, y_stop, 8, c_lblue); 
+    TFT_fillRect(x_icon - 18, y_stop - 4, 37, 9, c_lblue); 
+    TFT_fillRect(x_icon - 18, y_stop - 1, 37, 3, c_real_white); 
+    TFT_fillCircle(x_icon, y_stop, 3, c_real_white); 
+
+    // --- BOTTOM CORNERS (Button indicators) ---
+    uint8_t y_bot = _height - 14;
+
+    // Brush Icon (Bottom Left - Color Change)
+    uint8_t x_brush = 15;
+    TFT_drawLine(x_brush - 4, y_bot + 4, x_brush + 2, y_bot - 2, col); 
+    TFT_fillRect(x_brush + 2, y_bot - 5, 5, 5, col); 
+
+    // Power Icon (Bottom Right - Screen Toggle)
+    uint8_t x_pwr = _width - 15;
+    TFT_drawCircle(x_pwr, y_bot, 6, col);
+    TFT_fillRect(x_pwr - 3, y_bot - 7, 7, 5, TFT_WHITE); 
+    TFT_drawFastVLine(x_pwr, y_bot - 6, 6, col);
 }
 
 void draw_status() {
@@ -1576,12 +1752,13 @@ void draw_status() {
         display_state_old = display_state;
         display_clean_status();
     }
+    
     char *str;
     if (display_state == 0) {
-        // Draw splash
+        // Draw splash in the middle
         TFT_setFont(POKEMON48_FONT, NULL);
-        str = "Sulpog";
-        TFT_print(str, ((dispWin.x2 - dispWin.x1) / 2) - (TFT_getStringWidth(str) / 2), (dispWin.y2 - dispWin.y1) / 2 - (TFT_getfontheight() / 2));
+        str = "Sulpog+"; // RENAMED
+        TFT_print(str, ((dispWin.x2 - dispWin.x1) / 2) - (TFT_getStringWidth(str) / 2), (_height / 2) - (TFT_getfontheight() / 2));
         return;
     } else if (display_state == 1) {
         // Ready state
@@ -1596,57 +1773,85 @@ void draw_status() {
             snprintf(outbuf, sizeof (outbuf), "Ready %02d", current_time);
         }
         TFT_setFont(DETAIL_FONT, NULL);
-        TFT_print(outbuf, (_width / 2) - (TFT_getStringWidth(outbuf) / 2), (_height - 14) - (TFT_getfontheight() / 2));
+        TFT_print(outbuf, (_width / 2) - (TFT_getStringWidth(outbuf) / 2), (_height / 2) - (TFT_getfontheight() / 2));
         return;
     } else if (display_state == 2) {
-        // Connecting
-        TFT_fillRect((_width / 2) - 20, _height * 0.7, 40, 13, TFT_WHITE);
+        display_clean_status();
         TFT_setFont(DETAIL_FONT, NULL);
         str = "Connecting";
+    } else if (display_state == 4) {
+        display_clean_status();
+        TFT_setFont(DETAIL_FONT, NULL);
+        str = "CONFIG MODE"; // NEW STATE
     } else {
-        // Connected
         TFT_setFont(DETAIL_FONT, NULL);
         str = "";
-        //TODO: draw bluetooth device name
     }
-    TFT_print(str, (_width / 2) - (TFT_getStringWidth(str) / 2), (_height - 14) - (TFT_getfontheight() / 2));
+    
+    TFT_print(str, (_width / 2) - (TFT_getStringWidth(str) / 2), (_height / 2) - (TFT_getfontheight() / 2));
 }
 
 void draw_stats() {
-    //stats
     if (nvs_check_stats_change() == 1 || display_state < 3 || refresh_screen == 1) {
-        TFT_setFont(DETAIL_FONT, NULL);
-
-        //draw catches
-        char outbuf[8];
-        snprintf(outbuf, sizeof (outbuf), "%u", pokemon_caught);
-        TFT_print(outbuf, 28, 9);
         
-        //draw flees
+        // Wipe the text areas first to erase any previous numbers or colored warning strips
+        display_clean_stats();
+
+        // --- RUN AWAYS ---
+        TFT_setFont(DETAIL_FONT, NULL);
         char outbuf2[8];
         snprintf(outbuf2, sizeof (outbuf2), "%u", pokemon_seen-pokemon_caught);
-        TFT_print(outbuf2, 28+64, 9);
         
-        //draw stops
+        uint8_t text_w = TFT_getStringWidth(outbuf2);
+        TFT_print(outbuf2, _width - 25 - text_w, 9);
+        
+        TFT_setFont(DIGITAL32_FONT, NULL);
+        
+        // --- CATCHES (With Overlay) ---
+        char outbuf[8];
+        snprintf(outbuf, sizeof (outbuf), "%u", pokemon_caught);
+        TFT_print(outbuf, 55, (_height / 2) - 40 - (TFT_getfontheight() / 2));
+        
+        if (out_of_balls) {
+            TFT_fillRect(55, (_height / 2) - 60, _width - 55, 40, colors[font_color]);
+            color_t prev_bg = _bg; color_t prev_fg = _fg;
+            
+            _bg = colors[font_color]; 
+            _fg = (color_t){ 255, 255, 255 }; // Black text in inverted color mode
+            
+            TFT_setFont(DEFAULT_FONT, NULL); 
+            TFT_print("EMPTY", 60, (_height / 2) - 40 - (TFT_getfontheight() / 2));
+            
+            _bg = prev_bg; _fg = prev_fg;
+            TFT_setFont(DIGITAL32_FONT, NULL); 
+        }
+        
+        // --- POKESTOPS (With Overlay) ---
         char outbuf3[8];
         snprintf(outbuf3, sizeof (outbuf3), "%u", pokestops);
-        TFT_print(outbuf3, 28+128, 9);
+        TFT_print(outbuf3, 55, (_height / 2) + 40 - (TFT_getfontheight() / 2));
+        
+        if (bag_full) {
+            TFT_fillRect(55, (_height / 2) + 20, _width - 55, 40, colors[font_color]);
+            color_t prev_bg = _bg; color_t prev_fg = _fg;
+            
+            _bg = colors[font_color]; 
+            _fg = (color_t){ 255, 255, 255 }; // Black text in inverted color mode
+            
+            TFT_setFont(DEFAULT_FONT, NULL); 
+            TFT_print("FULL", 62, (_height / 2) + 40 - (TFT_getfontheight() / 2));
+            
+            _bg = prev_bg; _fg = prev_fg;
+            TFT_setFont(DIGITAL32_FONT, NULL); 
+        }
     }
 
-    //clock
-    //TFT_setFont(MAIN_FONT, NULL);
-    TFT_setFont(DIGITAL32_FONT, NULL);
+    // --- TIMER ---
+    TFT_fillRect(5, 7, 60, 14, TFT_WHITE);
+    TFT_setFont(DETAIL_FONT, NULL);
     char str[16];
     snprintf(str, sizeof (str), "%02d:%02d", minute, second);
-    uint8_t ww = TFT_getStringWidth(str);
-    TFT_print(str, ((dispWin.x2 - dispWin.x1) / 2) - (ww / 2), (dispWin.y2 - dispWin.y1) / 2 - (TFT_getfontheight() / 2));
-}
-
-void draw_device() {
-	char str[5];
-    snprintf(str, sizeof (str), "%i", device);
-	TFT_setFont(DETAIL_FONT, NULL);
-	TFT_print(str, _width-10, (_height - 14) - (TFT_getfontheight() / 2));
+    TFT_print(str, 5, 9);
 }
 
 uint32_t calculate_battery() {
@@ -1684,24 +1889,23 @@ uint32_t calculate_battery() {
     return adc_reading;
 }
 
+void draw_device() {
+    char str[5];
+    snprintf(str, sizeof (str), "%i", device);
+    TFT_setFont(DETAIL_FONT, NULL);
+    // Placed between the Brush icon and the Battery
+    TFT_print(str, 35, (_height - 14) - (TFT_getfontheight() / 2));
+}
+
 void draw_battery() {
-    //draw battery number
-    //TFT_setFont(DETAIL_FONT, NULL);
     uint32_t adc_reading = calculate_battery();
-    
-    /*uint16_t length = snprintf(NULL, 0, "%u", adc_reading);
-    char* battery_str = malloc(length + 1);
-    snprintf(battery_str, length + 1, "%u", adc_reading);
-    uint8_t w = TFT_getStringWidth(battery_str);
-    uint8_t h = TFT_getfontheight(battery_str);
-    TFT_print(battery_str, _width - w - 3, _height - h - 5);
-    free(battery_str);*/
-
-    uint8_t x = _width - 30;
-    uint8_t y = 14;
-
     uint8_t width = 24;
     uint8_t height = 14;
+    
+    // Perfectly centered horizontally on the bottom row
+    uint8_t x = (_width / 2) - (width / 2); 
+    uint8_t y = _height - 14;
+
     adc_reading = (adc_reading > BATTERY_MIN) ? adc_reading : BATTERY_MIN;
     adc_reading = (adc_reading < BATTERY_MAX) ? adc_reading : BATTERY_MAX;
     uint8_t part = ((float) (adc_reading - BATTERY_MIN) / (float) (BATTERY_MAX - BATTERY_MIN)) * (width - 4);
