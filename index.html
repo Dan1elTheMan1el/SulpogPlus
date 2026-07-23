@@ -6,8 +6,7 @@
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="theme-color" content="#121212">
-    <!-- Inline Web App Manifest -->
-    <link rel="manifest" href='data:application/manifest+json,%7B%22name%22%3A%22Sulpog%2B%20Config%22%2C%22short_name%22%3A%22Sulpog%2B%22%2C%22display%22%3A%22standalone%22%2C%22background_color%22%3A%22%23121212%22%2C%22theme_color%22%3A%22%23121212%22%7D'>
+    <link rel="manifest" href="manifest.json">
     <title>Sulpog+ Config</title>
     <style>
         :root {
@@ -276,5 +275,15 @@
     }
 </script>
 
+<script>
+    // Register the Service Worker for PWA Installation
+    if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+            navigator.serviceWorker.register('/SulpogPlus/sw.js')
+                .then(reg => console.log('Service Worker registered!', reg))
+                .catch(err => console.error('Service Worker registration failed: ', err));
+        });
+    }
+</script>
 </body>
 </html>
