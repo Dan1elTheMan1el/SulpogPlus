@@ -8,6 +8,7 @@
 #include "esp_sleep.h"
 #include "aes/esp_aes.h"
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 
 #include "esp_system.h"
 #include "esp_log.h"
@@ -55,8 +56,8 @@ uint8_t catch_shakes = 0;
 
 uint8_t screensaver = 0;
 uint8_t screensaver_time = 30;
-uint8_t settings_unlocked = 0;
 uint8_t auto_catch_new = 0; // Default to 0 (Disabled)
+uint8_t brightness = 255;
 
 uint8_t waiting_time = 60;
 uint8_t current_time = 60;
@@ -68,6 +69,8 @@ uint8_t display_state_old = 0;
 uint8_t display_state_ready = 0;
 
 uint8_t refresh_screen = 1;
+
+void set_screen_brightness();
 
 int8_t minute = 60;
 int8_t second = 0;
@@ -965,10 +968,14 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
                             screensaver_time = val;
                             screensaver = screensaver_time;
                         }
+                        if (cmd == 3) {
+                            brightness = val;
+                            set_screen_brightness(); // Apply instantly
+                        }
                         
-                        // Update the characteristic so subsequent reads are accurate
-                        uint8_t new_config[3] = {font_color, auto_catch_new, screensaver_time};
-                        esp_ble_gatts_set_attr_value(led_button_handle_table[IDX_CHAR_CONFIG_VAL], 3, new_config);
+                        // Update the characteristic (now 4 bytes)
+                        uint8_t new_config[4] = {font_color, auto_catch_new, screensaver_time, brightness};
+                        esp_ble_gatts_set_attr_value(led_button_handle_table[IDX_CHAR_CONFIG_VAL], 4, new_config);
                         
                         nvs_write();
                         _fg = colors[font_color];
@@ -1037,7 +1044,7 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
             screensaver = screensaver_time;
             screen_on = 1;
             current_time = waiting_time;
-            gpio_set_level(GPIO_OUTPUT_IO, screen_on);
+            set_screen_brightness();
             cert_state = 0;
             nvs_write();
 
@@ -1063,9 +1070,9 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
                 if (memcmp(param->add_attr_tab.svc_uuid.uuid.uuid128, GATTS_SERVICE_UUID_LED_BUTTON, ESP_UUID_LEN_128) == 0) {
                     memcpy(led_button_handle_table, param->add_attr_tab.handles, sizeof (led_button_handle_table));
                     
-                    // --- NEW: Set initial config values so the web app can read them ---
-                    uint8_t init_config[3] = {font_color, auto_catch_new, screensaver_time};
-                    esp_ble_gatts_set_attr_value(led_button_handle_table[IDX_CHAR_CONFIG_VAL], 3, init_config);
+                    // --- Set initial config values so the web app can read them ---
+                    uint8_t init_config[4] = {font_color, auto_catch_new, screensaver_time, brightness};
+                    esp_ble_gatts_set_attr_value(led_button_handle_table[IDX_CHAR_CONFIG_VAL], 4, init_config);
                     
                     esp_err_t response_err = esp_ble_gatts_start_service(led_button_handle_table[IDX_LED_BUTTON_SVC]);
                     if (response_err != ESP_OK) {
@@ -1264,8 +1271,8 @@ static void main_task(void *pvParameters) {
             if (screensaver > 0 && charging == 0) {
                 screensaver--;
                 if (screensaver == 0) {
-                    gpio_set_level(GPIO_OUTPUT_IO, 0);
                     screen_on = 0;
+                    set_screen_brightness();
                 }
             }
             
@@ -1367,7 +1374,7 @@ static void gpio_task(void* arg) {
                                 pokemon_changed = 2000; //trigger update
                                 refresh_screen = 1;
                             }
-                            gpio_set_level(GPIO_OUTPUT_IO, screen_on);
+                            set_screen_brightness();
                             if (screen_on == 0) {
                                 display_clean();
                             }
@@ -1384,6 +1391,13 @@ static void gpio_task(void* arg) {
 // =============================================================================
 //                                GPIO
 // =============================================================================
+void set_screen_brightness() {
+    // If screen is on, apply the brightness level. If off, set duty to 0 (blackout)
+    uint32_t duty = screen_on ? brightness : 0;
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+}
+
 
 void configure_gpio() {
     gpio_config_t io_conf;
@@ -1417,6 +1431,27 @@ void configure_gpio() {
     //hook isr handler for specific gpio pin
     gpio_isr_handler_add(GPIO_INPUT_IO_0, gpio_isr_handler, (void*) GPIO_INPUT_IO_0);
     gpio_isr_handler_add(GPIO_INPUT_IO_1, gpio_isr_handler, (void*) GPIO_INPUT_IO_1);
+
+    // --- Initialize PWM for Screen Brightness ---
+    ledc_timer_config_t ledc_timer = {
+        .speed_mode       = LEDC_LOW_SPEED_MODE,
+        .timer_num        = LEDC_TIMER_0,
+        .duty_resolution  = LEDC_TIMER_8_BIT, // 0-255 resolution
+        .freq_hz          = 4000,             // 4 kHz PWM frequency
+        .clk_cfg          = LEDC_AUTO_CLK
+    };
+    ledc_timer_config(&ledc_timer);
+
+    ledc_channel_config_t ledc_channel = {
+        .speed_mode     = LEDC_LOW_SPEED_MODE,
+        .channel        = LEDC_CHANNEL_0,
+        .timer_sel      = LEDC_TIMER_0,
+        .intr_type      = LEDC_INTR_DISABLE,
+        .gpio_num       = GPIO_OUTPUT_IO, // Attach PWM to the backlight pin
+        .duty           = brightness, 
+        .hpoint         = 0
+    };
+    ledc_channel_config(&ledc_channel);
 }
 
 static void IRAM_ATTR gpio_isr_handler(void* arg) {
@@ -1460,6 +1495,10 @@ void nvs_read() {
 
         uint8_t _auto_catch_new = 1;
         uint8_t _screensaver_time = 30;
+
+        uint8_t _brightness = 255;
+        err = nvs_get_u8(my_handle, "brightness", &_brightness);
+        if (err == ESP_OK) brightness = _brightness;
 
         err = nvs_get_u8(my_handle, "auto_catch_new", &_auto_catch_new);
         if (err == ESP_OK) auto_catch_new = _auto_catch_new;
@@ -1533,6 +1572,7 @@ void nvs_write() {
                 ESP_LOGI("NVS", "Done");
             }
 
+            err = nvs_set_u8(my_handle, "brightness", brightness);
             err = nvs_set_u8(my_handle, "auto_catch_new", auto_catch_new);
             err = nvs_set_u8(my_handle, "ss_time", screensaver_time);
 
