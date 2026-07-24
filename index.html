@@ -143,6 +143,12 @@
             <option value="0">Ignore (Catch manually)</option>
         </select>
 
+        <label for="alertNewSelect" id="alertNewLabel" style="margin-top: 15px; opacity: 0.4;">New Pokemon Alert</label>
+        <select id="alertNewSelect" style="opacity: 0.4;" disabled onchange="sendSetting(4, this.value)">
+            <option value="0">OFF</option>
+            <option value="1">ON (Flash Screen)</option>
+        </select>
+
         <label for="screensaverSelect" style="margin-top: 15px;">Screensaver Timeout</label>
         <select id="screensaverSelect" onchange="sendSetting(2, this.value)">
             <option value="10">10 Seconds</option>
@@ -175,6 +181,24 @@
         "#ffffff", // White
         "#a4b0be"  // Gray
     ];
+
+    function handleAutoCatchChange() {
+        const autoCatchVal = document.getElementById('autoCatchSelect').value;
+        const alertSelect = document.getElementById('alertNewSelect');
+        const alertLabel = document.getElementById('alertNewLabel');
+        
+        if (autoCatchVal == "0") {
+            // 0 = Ignore, so we ALLOW the alert
+            alertSelect.disabled = false;
+            alertSelect.style.opacity = 1;
+            alertLabel.style.opacity = 1;
+        } else {
+            // 1 = Auto-Catch, so we DISABLE the alert
+            alertSelect.disabled = true;
+            alertSelect.style.opacity = 0.4;
+            alertLabel.style.opacity = 0.4;
+        }
+    }
 
     function applyThemeColor(val) {
         const colorHex = themeColors[parseInt(val)];
@@ -242,11 +266,12 @@
             document.getElementById('autoCatchSelect').value = value.getUint8(1);
             document.getElementById('screensaverSelect').value = value.getUint8(2);
 
-            if (value.byteLength >= 4) {
+            if (value.byteLength >= 5) {
                 document.getElementById('brightnessSlider').value = value.getUint8(3);
+                document.getElementById('alertNewSelect').value = value.getUint8(4);
             }
             
-            // Change Web App accent color dynamically
+            handleAutoCatchChange(); // Update UI disable state
             applyThemeColor(colorVal);
 
             logMessage("Settings synced. Ready to configure!");
@@ -275,9 +300,9 @@
             
             if (cmd == 0) applyThemeColor(val); // Update web app color on change
             
-            const cmdNames = ["Theme Color", "Auto-Catch", "Screensaver", "Brightness"];
+            const cmdNames = ["Theme Color", "Auto-Catch", "Screensaver", "Brightness", "New Alert"];
             let valText = val;
-            if (cmd == 1) valText = (val == 1) ? "ON" : "OFF";
+            if (cmd == 1 || cmd == 4) valText = (val == 1) ? "ON" : "OFF";
             if (cmd == 2) valText = (val == 255) ? "Always On" : val + "s";
             if (cmd == 3) valText = Math.round((val / 255) * 100) + "%";
             
