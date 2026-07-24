@@ -57,6 +57,7 @@ uint8_t catch_shakes = 0;
 uint8_t screensaver = 0;
 uint8_t screensaver_time = 30;
 uint8_t auto_catch_new = 0; // Default to 0 (Disabled)
+uint8_t alert_new = 1; // 0 = Off, 1 = Flash Screen
 uint8_t brightness = 255;
 
 uint8_t waiting_time = 60;
@@ -724,6 +725,42 @@ void handle_protocol(esp_gatt_if_t gatts_if, const uint8_t *prepare_buf, int dat
     }
 }
 
+void alert_task(void *pvParameters) {
+    // Suspend the main display task so it doesn't draw over our alert
+    vTaskSuspend(xHandleMainTask);
+    
+    uint8_t old_screen = screen_on;
+    uint8_t old_brightness = brightness;
+    
+    brightness = 255; // Max brightness
+    
+    // Flash 3 times (ON/OFF = 6 half-second intervals)
+    for(int i = 0; i < 6; i++) {
+        screen_on = (i % 2 == 0) ? 1 : 0;
+        set_screen_brightness();
+        
+        if (screen_on) {
+            display_clean();
+            TFT_setFont(DETAIL_FONT, NULL);
+            char* str1 = "NEW POKEMON";
+            char* str2 = "FOUND!";
+            TFT_print(str1, (_width / 2) - (TFT_getStringWidth(str1) / 2), (_height / 2) - 15);
+            TFT_print(str2, (_width / 2) - (TFT_getStringWidth(str2) / 2), (_height / 2) + 5);
+        }
+        vTaskDelay(500 / portTICK_PERIOD_MS); 
+    }
+    
+    // Restore previous state
+    screen_on = old_screen;
+    brightness = old_brightness;
+    set_screen_brightness();
+    refresh_screen = 1;
+    
+    // Resume normal operation and kill this one-off task
+    vTaskResume(xHandleMainTask);
+    vTaskDelete(NULL);
+}
+
 void handle_led_notify_from_app(const uint8_t *buffer) {
     int number_of_patterns = buffer[3] & 0x1f;
     int priority = (buffer[3] >> 5) & 0x7;
@@ -774,8 +811,11 @@ void handle_led_notify_from_app(const uint8_t *buffer) {
         case PATTERN_CATCH_START_NEW: 
             if (auto_catch_new == 0) {
                 ESP_LOGI(GATTS_TABLE_TAG, "New encounter! Waiting for manual catch.");
-                // Return early without changing 'current_action' so it doesn't auto-throw
-                return; 
+                // Spawn the alert task if enabled
+                if (alert_new == 1) {
+                    xTaskCreate(alert_task, "alert_task", 2048, NULL, 10, NULL);
+                }
+                return;
             } else {
                 pokemon_seen++;
                 out_of_balls = 0; 
@@ -972,10 +1012,13 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
                             brightness = val;
                             set_screen_brightness(); // Apply instantly
                         }
+                        if (cmd == 4) {
+                            alert_new = val;
+                        }
                         
-                        // Update the characteristic (now 4 bytes)
-                        uint8_t new_config[4] = {font_color, auto_catch_new, screensaver_time, brightness};
-                        esp_ble_gatts_set_attr_value(led_button_handle_table[IDX_CHAR_CONFIG_VAL], 4, new_config);
+                        // Update the characteristic (now 5 bytes)
+                        uint8_t new_config[5] = {font_color, auto_catch_new, screensaver_time, brightness, alert_new};
+                        esp_ble_gatts_set_attr_value(led_button_handle_table[IDX_CHAR_CONFIG_VAL], 5, new_config);
                         
                         nvs_write();
                         _fg = colors[font_color];
@@ -1071,8 +1114,8 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
                     memcpy(led_button_handle_table, param->add_attr_tab.handles, sizeof (led_button_handle_table));
                     
                     // --- Set initial config values so the web app can read them ---
-                    uint8_t init_config[4] = {font_color, auto_catch_new, screensaver_time, brightness};
-                    esp_ble_gatts_set_attr_value(led_button_handle_table[IDX_CHAR_CONFIG_VAL], 4, init_config);
+                    uint8_t init_config[5] = {font_color, auto_catch_new, screensaver_time, brightness, alert_new};
+                    esp_ble_gatts_set_attr_value(led_button_handle_table[IDX_CHAR_CONFIG_VAL], 5, init_config);
                     
                     esp_err_t response_err = esp_ble_gatts_start_service(led_button_handle_table[IDX_LED_BUTTON_SVC]);
                     if (response_err != ESP_OK) {
@@ -1500,6 +1543,10 @@ void nvs_read() {
         err = nvs_get_u8(my_handle, "brightness", &_brightness);
         if (err == ESP_OK) brightness = _brightness;
 
+        uint8_t _alert_new = 0;
+        err = nvs_get_u8(my_handle, "alert_new", &_alert_new);
+        if (err == ESP_OK) alert_new = _alert_new;
+
         err = nvs_get_u8(my_handle, "auto_catch_new", &_auto_catch_new);
         if (err == ESP_OK) auto_catch_new = _auto_catch_new;
         
@@ -1573,6 +1620,7 @@ void nvs_write() {
             }
 
             err = nvs_set_u8(my_handle, "brightness", brightness);
+            err = nvs_set_u8(my_handle, "alert_new", alert_new);
             err = nvs_set_u8(my_handle, "auto_catch_new", auto_catch_new);
             err = nvs_set_u8(my_handle, "ss_time", screensaver_time);
 

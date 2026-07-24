@@ -11,8 +11,10 @@ This is a fork of Sulpog, made for the purpose of bringing the awesome project u
 New features in this fork:
 
 * Revamped GUI - added more color, bigger focus on important stats
-* Added dynamic toggle whether to catch new pokemon or not
+* Brightness control
+* Toggle whether to auto catch new pokemon or not
 * Added indicators when bag is full or no pokeballs in bag
+* Optional alert when new pokemon is detected
 * All settings configurable from webapp on device, without reconfiguring build
 
 Features from original Sulpog:
