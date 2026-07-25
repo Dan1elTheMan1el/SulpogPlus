@@ -51,6 +51,8 @@ int8_t device = 0;
 
 uint8_t bag_full = 0;
 uint8_t out_of_balls = 0;
+uint8_t box_full = 0;
+
 uint8_t current_action = 0; // 0 = Idle, 1 = Catching, 2 = Spinning
 uint8_t catch_shakes = 0;
 
@@ -780,6 +782,9 @@ void handle_led_notify_from_app(const uint8_t *buffer) {
 
     ESP_LOGI(GATTS_TABLE_TAG, "Pattern ID: %u", pattern_id);
     switch (pattern_id) {
+        case 0:
+            // Safely ignore the all-black LED "lights off" command
+            return;
         case PATTERN_STOP_START:
             current_action = 2; // We are targeting a stop
             break;
@@ -794,6 +799,7 @@ void handle_led_notify_from_app(const uint8_t *buffer) {
         case PATTERN_CATCH_START:
             pokemon_seen++;
             out_of_balls = 0; 
+            box_full = 0;
             current_action = 1; // We are catching
             catch_shakes = 0;
             ESP_LOGI(GATTS_TABLE_TAG, "Seen: %u", pokemon_seen);
@@ -803,8 +809,16 @@ void handle_led_notify_from_app(const uint8_t *buffer) {
             current_action = 0;
             ESP_LOGI(GATTS_TABLE_TAG, "Caught: %u", pokemon_caught);
             break;
+        case 15: // 1 Solid Red Flash = Pokemon Box is Full
+            box_full = 1;
+            current_action = 0;
+            ESP_LOGI(GATTS_TABLE_TAG, "Pokemon Box is Full!");
+            refresh_screen = 1;
+            return;
+        case 93: // 2 shake then flee
+        case 69: // 1 shake then flee
         case PATTERN_CATCH_FAIL: // 117
-            // A genuine flee after throwing a ball
+            // A flee after throwing a ball
             current_action = 0;
             ESP_LOGI(GATTS_TABLE_TAG, "Pokemon Fled.");
             break;
@@ -819,6 +833,7 @@ void handle_led_notify_from_app(const uint8_t *buffer) {
             } else {
                 pokemon_seen++;
                 out_of_balls = 0; 
+                box_full = 0;
                 current_action = 1;
                 catch_shakes = 0;
                 ESP_LOGI(GATTS_TABLE_TAG, "Seen New: %u", pokemon_seen);
@@ -1900,15 +1915,16 @@ void draw_stats() {
         snprintf(outbuf, sizeof (outbuf), "%u", pokemon_caught);
         TFT_print(outbuf, 55, (_height / 2) - 40 - (TFT_getfontheight() / 2));
         
-        if (out_of_balls) {
+        if (out_of_balls || box_full) {
             TFT_fillRect(55, (_height / 2) - 60, _width - 55, 40, colors[font_color]);
             color_t prev_bg = _bg; color_t prev_fg = _fg;
             
             _bg = colors[font_color]; 
             _fg = (color_t){ 255, 255, 255 }; // Black text in inverted color mode
             
-            TFT_setFont(DEFAULT_FONT, NULL); 
-            TFT_print("EMPTY", 60, (_height / 2) - 40 - (TFT_getfontheight() / 2));
+            TFT_setFont(DEFAULT_FONT, NULL);
+            char* warning_str = box_full ? "BOX FULL" : "NO BALLS";
+            TFT_print(warning_str, 60, (_height / 2) - 40 - (TFT_getfontheight() / 2));
             
             _bg = prev_bg; _fg = prev_fg;
             TFT_setFont(DIGITAL32_FONT, NULL); 

@@ -13,7 +13,7 @@ New features in this fork:
 * Revamped GUI - added more color, bigger focus on important stats
 * Brightness control
 * Toggle whether to auto catch new pokemon or not
-* Added indicators when bag is full or no pokeballs in bag
+* Added indicators when bag is full, box is full, or no pokeballs in bag
 * Optional alert when new pokemon is detected
 * All settings configurable from webapp on device, without reconfiguring build
 
