@@ -233,7 +233,12 @@
 
     async function toggleConnection() {
         if (configCharacteristic) {
-            if (bluetoothDevice && bluetoothDevice.gatt.connected) {
+            try {
+                console.log("Asking Sulpog+ to drop the connection...");
+
+                await sendSetting(5, 0); 
+            } catch (error) {
+                console.error("Disconnect error:", error);
                 bluetoothDevice.gatt.disconnect();
             }
             return;
